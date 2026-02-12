@@ -1,45 +1,49 @@
 import { NextResponse } from "next/server";
-import { GoogleGenerativeAI } from "@google/generative-ai";
-import { mockExplain } from "../../../lib/mockExplain";
-import {
-  getCachedExplain,
-  setCachedExplain,
-} from "../../../lib/explainCache";
+import { GoogleGenerativeAI } from "@google/generative-ai"; // Fixed: Removed "HQ" typo
+import { db } from "../../../db";
+import { searches } from "../../../db/schema";
+import { eq } from "drizzle-orm";
+
+// Initialize Gemini outside the handler to avoid recreating it on every request
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
 
 export async function POST(req: Request) {
-  const { userInput } = await req.json();
-
-  if (!userInput || !userInput.trim()) {
-    return NextResponse.json(
-      { result: "Please enter a problem name or link." },
-      { status: 200 }
-    );
-  }
-
-  // 1️⃣ Cache check
-  const cached = getCachedExplain(userInput);
-if (cached) {
-  console.log("CACHE HIT");
-  return NextResponse.json({
-    result: cached.response,
-    cachedAt: cached.timestamp,
-    source: "cache",
-  });
-}
-
   try {
-    const genAI = new GoogleGenerativeAI(
-      process.env.GEMINI_API_KEY!
-    );
+    const { userInput } = await req.json();
 
-    // ✅ Free-tier friendly & confirmed working
-    const model = genAI.getGenerativeModel({
-      model: "gemma-3-27b-it",
-    });
+    if (!userInput || !userInput.trim()) {
+      return NextResponse.json(
+        { result: "Please enter a problem name or link." },
+        { status: 200 }
+      );
+    }
+
+    // Normalized key (lowercase) so "Two Sum" matches "two sum"
+    const normalizedKey = userInput.trim().toLowerCase();
+
+    // 1️⃣ CHECK DATABASE (The "Persistent" Cache)
+    const existing = await db
+      .select()
+      .from(searches)
+      .where(eq(searches.query, normalizedKey))
+      .limit(1);
+
+    if (existing.length > 0) {
+      console.log("⚡ HIT: Serving from Database");
+      return NextResponse.json({
+        result: existing[0].response,
+        source: "database",
+      });
+    }
+
+    console.log("🤖 MISS: Calling Gemini...");
+
+    // 2️⃣ CALL GEMINI (If not in DB)
+    const model = genAI.getGenerativeModel({ model: "gemma-3-27b-it" });
 
     const prompt = `
 You are an expert DSA tutor.
-Explain the problem using this format:
+Explain the problem "${userInput}" clearly using this format:
 
 1. Problem Summary
 2. Key Insight
@@ -48,33 +52,28 @@ Explain the problem using this format:
 5. Space Complexity
 6. Common Mistakes
 7. Example Walkthrough
-
-Problem:
-${userInput}
 `;
 
-    const result = await model.generateContent(prompt);
-    const text = result.response.text();
+    const aiResult = await model.generateContent(prompt);
+    const responseText = aiResult.response.text();
 
-    // 2️⃣ Save to cache
-    setCachedExplain(userInput, text);
+    // 3️⃣ SAVE TO DATABASE (So next time it's instant)
+    await db.insert(searches).values({
+      query: normalizedKey,
+      response: responseText,
+    });
 
     return NextResponse.json({
-      result: text,
+      result: responseText,
       source: "gemini",
     });
+
   } catch (error: any) {
-    console.error("Gemini failed, using mock:", error?.message);
+    console.error("API Error:", error);
 
-    const fallback = mockExplain(userInput);
-
-    // Cache mock too (important!)
-    setCachedExplain(userInput, fallback);
-
-    return NextResponse.json({
-      result: fallback,
-      source: "mock",
-      note: "Mock response (Gemini quota exceeded)",
-    });
+    return NextResponse.json(
+      { result: "Failed to generate explanation. Please try again." },
+      { status: 500 }
+    );
   }
 }

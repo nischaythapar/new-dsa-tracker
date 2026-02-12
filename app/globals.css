@@ -1,7 +1,18 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import "tailwindcss";
+@plugin "@tailwindcss/typography";
 
+/* This is where v4 allows you to configure your theme directly in CSS */
+@theme {
+  --color-zinc-950: #09090b;
+  --color-zinc-900: #18181b;
+  --color-zinc-800: #27272a;
+}
+
+/* Custom global styles */
 html {
   scroll-behavior: smooth;
+}
+
+body {
+  @apply bg-zinc-950 text-white;
 }
